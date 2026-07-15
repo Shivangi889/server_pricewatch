@@ -10,15 +10,34 @@ notificationsRouter.use(requireAuth)
 notificationsRouter.get('/', async (req, res, next) => {
   try {
     const unreadOnly = req.query.unread === 'true'
-    const notifications = await prisma.notification.findMany({
-      where: unreadOnly ? { isRead: false } : undefined,
-      include: {
-        product: { select: { id: true, title: true, nickname: true, store: true } },
-      },
-      orderBy: { createdAt: 'desc' },
-      take: 100,
-    })
-    res.json({ notifications })
+    const where = unreadOnly ? { isRead: false } : undefined
+    const take = Math.min(
+      Math.max(Number(req.query.limit) || 500, 1),
+      1000,
+    )
+
+    const [notifications, total, unread] = await Promise.all([
+      prisma.notification.findMany({
+        where,
+        include: {
+          product: {
+            select: {
+              id: true,
+              title: true,
+              nickname: true,
+              url: true,
+              store: true,
+            },
+          },
+        },
+        orderBy: { createdAt: 'desc' },
+        take,
+      }),
+      prisma.notification.count(),
+      prisma.notification.count({ where: { isRead: false } }),
+    ])
+
+    res.json({ notifications, total, unread })
   } catch (err) {
     next(err)
   }

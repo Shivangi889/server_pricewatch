@@ -33,7 +33,7 @@ dashboardRouter.get('/stats', async (_req, res, next) => {
     ])
 
     const recentAlerts = await prisma.notification.findMany({
-      take: 8,
+      take: 5,
       orderBy: { createdAt: 'desc' },
       include: {
         product: {
@@ -41,6 +41,7 @@ dashboardRouter.get('/stats', async (_req, res, next) => {
             id: true,
             title: true,
             nickname: true,
+            url: true,
             store: { select: { slug: true, name: true, color: true } },
           },
         },
