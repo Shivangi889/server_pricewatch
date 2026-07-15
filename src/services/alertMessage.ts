@@ -16,6 +16,13 @@ function escapeHtml(s: string) {
     .replace(/"/g, '&quot;')
 }
 
+/** Keep Telegram readable — full title stays on dashboard via product record. */
+function shortTitle(name: string, max = 72) {
+  const t = String(name || 'Tracked item').trim().replace(/\s+/g, ' ')
+  if (t.length <= max) return t
+  return `${t.slice(0, max - 1).trim()}…`
+}
+
 export type AlertCopy = {
   /** Short text stored in Notification.message (no raw URL dump) */
   dashboard: string
@@ -31,13 +38,31 @@ type BaseFields = {
   price?: number
 }
 
-function telegramFooter(base: BaseFields) {
+function telegramShell(opts: {
+  emoji: string
+  headline: string
+  name: string
+  detailLines: string[]
+  base: BaseFields
+}) {
+  const title = shortTitle(opts.name)
   const lines = [
+    `${opts.emoji} <b>PriceWatch · ${escapeHtml(opts.headline)}</b>`,
     '',
-    `🏪 <b>${escapeHtml(base.storeName)}</b>`,
+    '<b>Product</b>',
+    escapeHtml(title),
+    '',
+    ...opts.detailLines,
+    '',
+    `<b>Store</b> · ${escapeHtml(opts.base.storeName)}`,
   ]
-  if (base.pincode) lines.push(`📍 Pincode <code>${escapeHtml(base.pincode)}</code>`)
-  lines.push(`🔗 <a href="${escapeHtml(base.url)}">Open product</a>`)
+  if (opts.base.pincode) {
+    lines.push(`<b>Pincode</b> · <code>${escapeHtml(opts.base.pincode)}</code>`)
+  }
+  lines.push('')
+  lines.push(`🔗 <a href="${escapeHtml(opts.base.url)}">Open product link</a>`)
+  // Plain URL as backup (shows even if HTML link fails)
+  lines.push(escapeHtml(opts.base.url))
   return lines.join('\n')
 }
 
@@ -47,16 +72,17 @@ export function priceDropAlert(
   const saved = Math.max(0, Math.round(base.oldPrice - base.newPrice))
   return {
     dashboard: `${formatInr(base.oldPrice)} → ${formatInr(base.newPrice)}${saved ? ` · saved ${formatInr(saved)}` : ''}`,
-    telegram: [
-      '📉 <b>Price Drop</b>',
-      escapeHtml(base.name),
-      '',
-      `<s>${formatInr(base.oldPrice)}</s> → <b>${formatInr(base.newPrice)}</b>`,
-      saved ? `💸 Saved ${formatInr(saved)}` : null,
-      telegramFooter(base),
-    ]
-      .filter(Boolean)
-      .join('\n'),
+    telegram: telegramShell({
+      emoji: '📉',
+      headline: 'Price dropped',
+      name: base.name,
+      base,
+      detailLines: [
+        '<b>What changed</b>',
+        `Price fell from <s>${formatInr(base.oldPrice)}</s> to <b>${formatInr(base.newPrice)}</b>`,
+        saved ? `You save <b>${formatInr(saved)}</b>` : '',
+      ].filter(Boolean),
+    }),
   }
 }
 
@@ -65,35 +91,46 @@ export function priceUpAlert(
 ): AlertCopy {
   return {
     dashboard: `${formatInr(base.oldPrice)} → ${formatInr(base.newPrice)}`,
-    telegram: [
-      '📈 <b>Price Up</b>',
-      escapeHtml(base.name),
-      '',
-      `${formatInr(base.oldPrice)} → <b>${formatInr(base.newPrice)}</b>`,
-      telegramFooter(base),
-    ].join('\n'),
+    telegram: telegramShell({
+      emoji: '📈',
+      headline: 'Price went up',
+      name: base.name,
+      base,
+      detailLines: [
+        '<b>What changed</b>',
+        `Price rose from ${formatInr(base.oldPrice)} to <b>${formatInr(base.newPrice)}</b>`,
+      ],
+    }),
   }
 }
 
 export function discountChangeAlert(
   base: BaseFields & { oldDiscount: number; newDiscount: number },
 ): AlertCopy {
+  const direction =
+    base.newDiscount > base.oldDiscount
+      ? 'Discount increased'
+      : base.newDiscount < base.oldDiscount
+        ? 'Discount reduced'
+        : 'Discount changed'
   const priceLine =
     base.price != null && base.price > 0 ? ` · ${formatInr(base.price)}` : ''
   return {
     dashboard: `${base.oldDiscount}% → ${base.newDiscount}%${priceLine}`,
-    telegram: [
-      '🏷️ <b>Discount Change</b>',
-      escapeHtml(base.name),
-      '',
-      `<b>${base.oldDiscount}%</b> → <b>${base.newDiscount}%</b>`,
-      base.price != null && base.price > 0
-        ? `💰 Price ${formatInr(base.price)}`
-        : null,
-      telegramFooter(base),
-    ]
-      .filter(Boolean)
-      .join('\n'),
+    telegram: telegramShell({
+      emoji: '🏷️',
+      headline: direction,
+      name: base.name,
+      base,
+      detailLines: [
+        '<b>What changed</b>',
+        `Discount was <b>${base.oldDiscount}% off</b>`,
+        `Now it is <b>${base.newDiscount}% off</b>`,
+        base.price != null && base.price > 0
+          ? `Current price · <b>${formatInr(base.price)}</b>`
+          : '',
+      ].filter(Boolean),
+    }),
   }
 }
 
@@ -101,26 +138,29 @@ export function newOfferAlert(base: BaseFields & { offerText: string }): AlertCo
   const offer = base.offerText.trim()
   return {
     dashboard: offer.slice(0, 120) + (offer.length > 120 ? '…' : ''),
-    telegram: [
-      '🎁 <b>New Offer</b>',
-      escapeHtml(base.name),
-      '',
-      escapeHtml(offer),
-      telegramFooter(base),
-    ].join('\n'),
+    telegram: telegramShell({
+      emoji: '🎁',
+      headline: 'New offer',
+      name: base.name,
+      base,
+      detailLines: ['<b>Offer</b>', escapeHtml(offer)],
+    }),
   }
 }
 
 export function pincodeAvailableAlert(base: BaseFields & { price: number }): AlertCopy {
   return {
     dashboard: `Available · Pin ${base.pincode} · ${formatInr(base.price)}`,
-    telegram: [
-      '✅ <b>Now Available</b>',
-      escapeHtml(base.name),
-      '',
-      `📍 Pincode <code>${escapeHtml(base.pincode || '')}</code>`,
-      `💰 ${formatInr(base.price)}`,
-      telegramFooter(base),
-    ].join('\n'),
+    telegram: telegramShell({
+      emoji: '✅',
+      headline: 'Now available',
+      name: base.name,
+      base,
+      detailLines: [
+        '<b>What changed</b>',
+        `This product is deliverable again for pincode <code>${escapeHtml(base.pincode || '')}</code>`,
+        `Price · <b>${formatInr(base.price)}</b>`,
+      ],
+    }),
   }
 }

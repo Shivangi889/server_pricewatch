@@ -3,8 +3,11 @@ import { flipkartScraper } from './flipkart.js'
 import {
   bigbasketScraper,
   blinkitScraper,
+  cromaScraper,
   instamartScraper,
+  jiomartScraper,
   meeshoScraper,
+  relianceDigitalScraper,
   zeptoScraper,
 } from './meeshoAndQuick.js'
 import { demoScrape } from './demo.js'
@@ -18,6 +21,9 @@ const scrapers: Record<string, StoreScraper> = {
   zepto: zeptoScraper,
   instamart: instamartScraper,
   bigbasket: bigbasketScraper,
+  'reliance-digital': relianceDigitalScraper,
+  jiomart: jiomartScraper,
+  croma: cromaScraper,
 }
 
 export function getScraperMode(): 'live' | 'demo' | 'auto' {

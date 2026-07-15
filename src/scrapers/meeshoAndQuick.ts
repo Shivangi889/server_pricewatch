@@ -133,3 +133,18 @@ export const bigbasketScraper: StoreScraper = {
   slug: 'bigbasket',
   scrape: (ctx) => scrapeLivePage(ctx, 'BigBasket'),
 }
+
+export const relianceDigitalScraper: StoreScraper = {
+  slug: 'reliance-digital',
+  scrape: (ctx) => scrapeLivePage(ctx, 'Reliance Digital'),
+}
+
+export const jiomartScraper: StoreScraper = {
+  slug: 'jiomart',
+  scrape: (ctx) => scrapeLivePage(ctx, 'JioMart'),
+}
+
+export const cromaScraper: StoreScraper = {
+  slug: 'croma',
+  scrape: (ctx) => scrapeLivePage(ctx, 'Croma'),
+}

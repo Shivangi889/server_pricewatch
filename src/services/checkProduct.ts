@@ -3,6 +3,14 @@ import { prisma } from '../lib/prisma.js'
 import { scrapeProduct } from '../scrapers/index.js'
 import { withScrapeGate } from '../scrapers/scrapeGate.js'
 import { logActivity, sendTelegram } from './telegram.js'
+import {
+  discountChangeAlert,
+  newOfferAlert,
+  pincodeAvailableAlert,
+  priceDropAlert,
+  priceUpAlert,
+  type AlertCopy,
+} from './alertMessage.js'
 
 export type CheckJobData = {
   productId: string
@@ -63,7 +71,7 @@ async function shouldAlert(type: AlertType) {
 async function createAlert(opts: {
   productId: string
   type: AlertType
-  message: string
+  copy: AlertCopy
   oldPrice?: number
   newPrice?: number
   pincode?: string
@@ -75,7 +83,7 @@ async function createAlert(opts: {
     data: {
       productId: opts.productId,
       type: opts.type,
-      message: opts.message,
+      message: opts.copy.dashboard,
       oldPrice: opts.oldPrice != null ? money(opts.oldPrice) : undefined,
       newPrice: opts.newPrice != null ? money(opts.newPrice) : undefined,
       pincode: opts.pincode,
@@ -83,7 +91,7 @@ async function createAlert(opts: {
   })
 
   if (opts.telegramEnabled) {
-    await sendTelegram(opts.message)
+    await sendTelegram(opts.copy.telegram, { html: true })
   }
 
   return notification
@@ -124,7 +132,6 @@ export async function checkProductJob(data: CheckJobData) {
 
   let scrape
   try {
-    // One scrape at a time — prevents Chromium from freezing the whole API
     scrape = await withScrapeGate(() =>
       scrapeProduct({
         url: product.url,
@@ -146,15 +153,20 @@ export async function checkProductJob(data: CheckJobData) {
 
   const alerts: string[] = []
   const name = displayName(product, scrape.title)
+  const base = {
+    name,
+    storeName: product.store.name,
+    url: product.url,
+    pincode: data.pincode,
+    price: scrape.price,
+  }
 
-  // Pincode availability: only when it flips unavailable → available (not on first ever check)
   if (data.pincode && pinRow) {
     if (previousAvailable === false && scrape.available === true) {
-      const message = `✅ Available on ${product.store.name}\n${name}\nPincode: ${data.pincode}\nPrice: ${formatInr(scrape.price)}\n${product.url}`
       await createAlert({
         productId: product.id,
         type: 'pincode_available',
-        message,
+        copy: pincodeAvailableAlert({ ...base, price: scrape.price }),
         newPrice: scrape.price,
         pincode: data.pincode,
         telegramEnabled: product.telegramEnabled,
@@ -171,15 +183,17 @@ export async function checkProductJob(data: CheckJobData) {
     })
   }
 
-  // Price / discount / offer (skip noisy price alerts when unavailable on pin)
   const canPriceAlert = !data.pincode || scrape.available
 
   if (canPriceAlert && previousPrice > 0 && scrape.price < previousPrice) {
-    const message = `📉 Price Drop\n${name}\n${formatInr(previousPrice)} → ${formatInr(scrape.price)}\n${product.url}`
     await createAlert({
       productId: product.id,
       type: 'price_decrease',
-      message,
+      copy: priceDropAlert({
+        ...base,
+        oldPrice: previousPrice,
+        newPrice: scrape.price,
+      }),
       oldPrice: previousPrice,
       newPrice: scrape.price,
       pincode: data.pincode,
@@ -187,11 +201,14 @@ export async function checkProductJob(data: CheckJobData) {
     })
     alerts.push('price_decrease')
   } else if (canPriceAlert && previousPrice > 0 && scrape.price > previousPrice) {
-    const message = `📈 Price Up\n${name}\n${formatInr(previousPrice)} → ${formatInr(scrape.price)}\n${product.url}`
     await createAlert({
       productId: product.id,
       type: 'price_increase',
-      message,
+      copy: priceUpAlert({
+        ...base,
+        oldPrice: previousPrice,
+        newPrice: scrape.price,
+      }),
       oldPrice: previousPrice,
       newPrice: scrape.price,
       pincode: data.pincode,
@@ -202,11 +219,16 @@ export async function checkProductJob(data: CheckJobData) {
 
   const newDiscount = scrape.discount ?? 0
   if (canPriceAlert && previousDiscount !== newDiscount && previousPrice > 0) {
-    const message = `🏷️ Discount change\n${name}\n${previousDiscount}% → ${newDiscount}%`
     await createAlert({
       productId: product.id,
       type: 'discount_change',
-      message,
+      copy: discountChangeAlert({
+        ...base,
+        oldDiscount: previousDiscount,
+        newDiscount,
+      }),
+      oldPrice: previousPrice,
+      newPrice: scrape.price,
       pincode: data.pincode,
       telegramEnabled: product.telegramEnabled,
     })
@@ -214,11 +236,10 @@ export async function checkProductJob(data: CheckJobData) {
   }
 
   if (scrape.offerText) {
-    const message = `🎁 New Offer\n${name}\n${scrape.offerText}\n${product.url}`
     await createAlert({
       productId: product.id,
       type: 'new_offer',
-      message,
+      copy: newOfferAlert({ ...base, offerText: scrape.offerText }),
       pincode: data.pincode,
       telegramEnabled: product.telegramEnabled,
     })
