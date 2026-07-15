@@ -1,0 +1,157 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+enum StoreCategory {
+  ecommerce
+  quick_commerce
+}
+
+enum StoreHealth {
+  healthy
+  degraded
+  down
+}
+
+enum ProductStatus {
+  tracking
+  paused
+  error
+}
+
+enum AlertType {
+  price_decrease
+  price_increase
+  discount_change
+  new_offer
+  pincode_available
+}
+
+enum LogLevel {
+  info
+  warn
+  error
+}
+
+/// Single personal owner account (not multi-tenant)
+model Owner {
+  id                 String   @id @default(cuid())
+  name               String
+  email              String   @unique
+  passwordHash       String
+  avatarUrl          String?
+  telegramChatId     String?
+  telegramBotToken   String?
+  checkIntervalMin   Int      @default(30)
+  maxRetries         Int      @default(5)
+  pauseTracking      Boolean  @default(false)
+  alertPriceDecrease Boolean  @default(true)
+  alertPriceIncrease Boolean  @default(true)
+  alertDiscountChange Boolean @default(true)
+  alertNewOffer      Boolean  @default(true)
+  alertPincodeAvailable Boolean @default(true)
+  telegramEnabled    Boolean  @default(true)
+  createdAt          DateTime @default(now())
+  updatedAt          DateTime @updatedAt
+}
+
+model Store {
+  id              String        @id @default(cuid())
+  slug            String        @unique
+  name            String
+  domain          String
+  website         String?
+  color           String        @default("#10B981")
+  category        StoreCategory @default(ecommerce)
+  requiresPincode Boolean       @default(false)
+  status          StoreHealth   @default(healthy)
+  builtIn         Boolean       @default(false)
+  createdAt       DateTime      @default(now())
+  updatedAt       DateTime      @updatedAt
+  products        Product[]
+}
+
+model Product {
+  id              String            @id @default(cuid())
+  storeId         String
+  store           Store             @relation(fields: [storeId], references: [id], onDelete: Restrict)
+  url             String
+  title           String
+  nickname        String?
+  image           String?
+  currentPrice    Decimal           @default(0) @db.Decimal(12, 2)
+  oldPrice        Decimal           @default(0) @db.Decimal(12, 2)
+  discount        Int               @default(0)
+  rating          Float?
+  availability    String?
+  targetPrice     Decimal?          @db.Decimal(12, 2)
+  status          ProductStatus     @default(tracking)
+  telegramEnabled Boolean           @default(true)
+  lastChecked     DateTime?
+  createdAt       DateTime          @default(now())
+  updatedAt       DateTime          @updatedAt
+  pincodes        ProductPincode[]
+  history         PriceHistory[]
+  notifications   Notification[]
+
+  @@index([storeId])
+  @@index([status])
+}
+
+model ProductPincode {
+  id            String    @id @default(cuid())
+  productId     String
+  product       Product   @relation(fields: [productId], references: [id], onDelete: Cascade)
+  pincode       String
+  lastAvailable Boolean?
+  lastCheckedAt DateTime?
+  createdAt     DateTime  @default(now())
+
+  @@unique([productId, pincode])
+  @@index([productId])
+}
+
+model PriceHistory {
+  id        String   @id @default(cuid())
+  productId String
+  product   Product  @relation(fields: [productId], references: [id], onDelete: Cascade)
+  price     Decimal  @db.Decimal(12, 2)
+  discount  Int      @default(0)
+  pincode   String?
+  checkedAt DateTime @default(now())
+
+  @@index([productId, checkedAt])
+}
+
+model Notification {
+  id        String    @id @default(cuid())
+  productId String?
+  product   Product?  @relation(fields: [productId], references: [id], onDelete: SetNull)
+  type      AlertType
+  oldPrice  Decimal?  @db.Decimal(12, 2)
+  newPrice  Decimal?  @db.Decimal(12, 2)
+  message   String?
+  pincode   String?
+  isRead    Boolean   @default(false)
+  createdAt DateTime  @default(now())
+
+  @@index([isRead, createdAt])
+  @@index([productId])
+}
+
+model ActivityLog {
+  id        String   @id @default(cuid())
+  level     LogLevel @default(info)
+  source    String
+  message   String
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+  @@index([level])
+}

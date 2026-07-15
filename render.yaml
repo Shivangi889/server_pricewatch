@@ -1,0 +1,65 @@
+# Render Blueprint — deploy from repo root with Root Directory = server
+# Or connect this folder as the service root.
+#
+# Dashboard alternative: New → Web Service → Docker → this Dockerfile
+# + New → Key Value (Redis) → copy REDIS_URL into the web service.
+
+services:
+  - type: web
+    name: pricewatch-api
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    plan: starter
+    healthCheckPath: /api/health
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: ENABLE_WORKER
+        value: "true"
+      - key: SCRAPER_MODE
+        value: live
+      - key: WORKER_CONCURRENCY
+        value: "1"
+      - key: FREE_TIER
+        value: "true"
+      - key: REFRESH_WAIT_MS
+        value: "25000"
+      - key: BROWSER_IDLE_CLOSE_MS
+        value: "120000"
+      - key: JWT_EXPIRES_IN
+        value: 7d
+      # Optional: SCRAPERAPI_KEY — strongly recommended for Amazon on free Render
+      - key: SCRAPERAPI_KEY
+        sync: false
+      # Set these in Render dashboard (do not commit secrets):
+      # DATABASE_URL, DIRECT_URL — from Neon
+      # JWT_SECRET — random long string
+      # CORS_ORIGIN — your frontend URL (https://….vercel.app)
+      # OWNER_EMAIL, OWNER_PASSWORD, OWNER_NAME — for one-time seed
+      # SCRAPERAPI_KEY — optional
+      - key: DATABASE_URL
+        sync: false
+      - key: DIRECT_URL
+        sync: false
+      - key: JWT_SECRET
+        sync: false
+      - key: CORS_ORIGIN
+        sync: false
+      - key: OWNER_EMAIL
+        sync: false
+      - key: OWNER_PASSWORD
+        sync: false
+      - key: OWNER_NAME
+        sync: false
+      - key: REDIS_URL
+        fromService:
+          type: keyvalue
+          name: pricewatch-redis
+          property: connectionString
+
+  - type: keyvalue
+    name: pricewatch-redis
+    plan: free
+    maxmemoryPolicy: noeviction
+    ipAllowList: [] # allow web service
