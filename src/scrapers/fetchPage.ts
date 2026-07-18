@@ -99,6 +99,7 @@ export async function fetchHtmlBrowser(
     pincode?: string
     waitMs?: number
     waitSelector?: string
+    waitText?: string | RegExp
     navigationTimeoutMs?: number
   },
 ) {
@@ -168,6 +169,15 @@ export async function fetchHtmlBrowser(
         .catch(() => undefined)
     }
 
+    // Flipkart WOW: "Buy at ₹…" often mounts after the main price
+    if (opts?.waitText) {
+      await page
+        .getByText(opts.waitText, { exact: false })
+        .first()
+        .waitFor({ timeout: Math.min(8_000, navTimeout) })
+        .catch(() => undefined)
+    }
+
     await new Promise((r) => setTimeout(r, opts?.waitMs ?? limits.settleMs))
     const html = await page.content()
     return cheerio.load(html)
@@ -182,6 +192,8 @@ export async function fetchPageSmart(
     pincode?: string
     preferBrowser?: boolean
     waitSelector?: string
+    waitText?: string | RegExp
+    waitMs?: number
     navigationTimeoutMs?: number
     /** Force ScraperAPI JS render on HTTP path */
     httpRender?: boolean
@@ -224,6 +236,8 @@ export async function fetchPageSmart(
     return await fetchHtmlBrowser(url, {
       pincode: opts?.pincode,
       waitSelector: opts?.waitSelector,
+      waitText: opts?.waitText,
+      waitMs: opts?.waitMs,
       navigationTimeoutMs: opts?.navigationTimeoutMs ?? limits.navigationTimeoutMs,
     })
   } catch (browserErr) {

@@ -161,6 +161,33 @@ export async function checkProductJob(data: CheckJobData) {
     price: scrape.price,
   }
 
+  // Flipkart must never store/alert on list price (₹27,999) — only WOW (Buy at / Lowest)
+  const flipkartWowMatchEarly =
+    typeof scrape.rawNote === 'string' ? scrape.rawNote.match(/wow=(\d+)\s+sell=(\d+)/) : null
+  const flipkartExplicit =
+    typeof scrape.rawNote === 'string' &&
+    (/buyAt=\d+/.test(scrape.rawNote) || /label=\d+/.test(scrape.rawNote))
+  if (product.store.slug === 'flipkart') {
+    const wow = flipkartWowMatchEarly ? Number(flipkartWowMatchEarly[1]) : null
+    const sell = flipkartWowMatchEarly ? Number(flipkartWowMatchEarly[2]) : null
+    if (
+      wow == null ||
+      sell == null ||
+      !flipkartExplicit ||
+      scrape.price !== wow ||
+      wow >= sell ||
+      (scrape.discount ?? 0) !== 0
+    ) {
+      const msg = `Flipkart refused non-WOW price (got ${scrape.price}, note=${scrape.rawNote || 'none'})`
+      await prisma.product.update({
+        where: { id: product.id },
+        data: { status: 'error', lastChecked: new Date() },
+      })
+      await logActivity('error', product.store.slug, `${product.title}: ${msg}`)
+      throw new Error(msg)
+    }
+  }
+
   if (data.pincode && pinRow) {
     if (previousAvailable === false && scrape.available === true) {
       await createAlert({
@@ -184,8 +211,60 @@ export async function checkProductJob(data: CheckJobData) {
   }
 
   const canPriceAlert = !data.pincode || scrape.available
+  // Flipkart: only alert on confirmed WOW scrapes (never list-price false positives)
+  const flipkartWowMatch =
+    typeof scrape.rawNote === 'string' ? scrape.rawNote.match(/wow=(\d+)\s+sell=(\d+)/) : null
+  const flipkartWow = flipkartWowMatch ? Number(flipkartWowMatch[1]) : null
+  const flipkartSell = flipkartWowMatch ? Number(flipkartWowMatch[2]) : null
+  const isFlipkart = product.store.slug === 'flipkart'
 
-  if (canPriceAlert && previousPrice > 0 && scrape.price < previousPrice) {
+  // Jumping from a real WOW up to (near) list price is pollution — keep old WOW, no alert
+  const flipkartListPollution =
+    isFlipkart &&
+    flipkartSell != null &&
+    flipkartWow != null &&
+    previousPrice > 0 &&
+    ((previousPrice === flipkartSell && scrape.price === flipkartWow) ||
+      (scrape.price > previousPrice &&
+        scrape.price >= Math.round(flipkartSell * 0.98) &&
+        previousPrice < flipkartSell * 0.98))
+
+  if (isFlipkart && flipkartListPollution && scrape.price > previousPrice) {
+    await logActivity(
+      'warn',
+      'flipkart',
+      `Ignored list-price pollution on ${name}: ${previousPrice}→${scrape.price} (sell=${flipkartSell}) — keeping WOW`,
+    )
+    await prisma.product.update({
+      where: { id: product.id },
+      data: {
+        status: 'tracking',
+        lastChecked: new Date(),
+        // keep previous WOW price — do not write list
+        currentPrice: money(previousPrice),
+        oldPrice: money(previousPrice),
+        discount: 0,
+      },
+    })
+    return {
+      ok: true,
+      source: scrape.source,
+      price: previousPrice,
+      available: scrape.available,
+      alerts: [],
+      skipped: 'flipkart_list_pollution',
+    }
+  }
+
+  const flipkartWowOk =
+    !isFlipkart ||
+    (flipkartWow != null &&
+      flipkartSell != null &&
+      scrape.price === flipkartWow &&
+      scrape.price < flipkartSell &&
+      !flipkartListPollution)
+
+  if (flipkartWowOk && canPriceAlert && previousPrice > 0 && scrape.price < previousPrice) {
     await createAlert({
       productId: product.id,
       type: 'price_decrease',
@@ -200,7 +279,7 @@ export async function checkProductJob(data: CheckJobData) {
       telegramEnabled: product.telegramEnabled,
     })
     alerts.push('price_decrease')
-  } else if (canPriceAlert && previousPrice > 0 && scrape.price > previousPrice) {
+  } else if (flipkartWowOk && canPriceAlert && previousPrice > 0 && scrape.price > previousPrice) {
     await createAlert({
       productId: product.id,
       type: 'price_increase',
@@ -218,7 +297,13 @@ export async function checkProductJob(data: CheckJobData) {
   }
 
   const newDiscount = scrape.discount ?? 0
-  if (canPriceAlert && previousDiscount !== newDiscount && previousPrice > 0) {
+  // Flipkart tracks WOW price only — never alert on MRP/% discount
+  if (
+    product.store.slug !== 'flipkart' &&
+    canPriceAlert &&
+    previousDiscount !== newDiscount &&
+    previousPrice > 0
+  ) {
     await createAlert({
       productId: product.id,
       type: 'discount_change',
@@ -261,8 +346,15 @@ export async function checkProductJob(data: CheckJobData) {
       status: 'tracking',
       lastChecked: new Date(),
       currentPrice: money(scrape.price),
-      oldPrice: money(scrape.oldPrice || previousPrice || scrape.price),
-      discount: newDiscount,
+      // Prefer scraper MRP; Flipkart sets oldPrice === WOW so UI shows no strikethrough/%
+      oldPrice: money(
+        isFlipkart
+          ? scrape.price
+          : scrape.oldPrice != null
+            ? scrape.oldPrice
+            : previousPrice || scrape.price,
+      ),
+      discount: isFlipkart ? 0 : newDiscount,
       title: name === 'Tracked item' ? product.title : name,
       image: scrape.image || product.image,
       availability: scrape.available ? 'in_stock' : 'out_of_stock',

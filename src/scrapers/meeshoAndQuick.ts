@@ -114,16 +114,6 @@ export const meeshoScraper: StoreScraper = {
   scrape: (ctx) => scrapeLivePage(ctx, 'Meesho'),
 }
 
-export const blinkitScraper: StoreScraper = {
-  slug: 'blinkit',
-  scrape: (ctx) => scrapeLivePage(ctx, 'Blinkit'),
-}
-
-export const zeptoScraper: StoreScraper = {
-  slug: 'zepto',
-  scrape: (ctx) => scrapeLivePage(ctx, 'Zepto'),
-}
-
 export const instamartScraper: StoreScraper = {
   slug: 'instamart',
   scrape: (ctx) => scrapeLivePage(ctx, 'Instamart'),

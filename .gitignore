@@ -10,6 +10,9 @@ node_modules/
 *.log
 npm-debug.log*
 
+# Scraper persisted cookies / session state (contains anti-bot tokens)
+.scrape-state/
+
 # OS / IDE
 .DS_Store
 Thumbs.db

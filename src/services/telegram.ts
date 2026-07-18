@@ -5,6 +5,11 @@ export async function logActivity(
   source: string,
   message: string,
 ) {
+  const line = `[${source}] ${message}`
+  if (level === 'error') console.error(line)
+  else if (level === 'warn') console.warn(line)
+  else console.log(line)
+
   try {
     await prisma.activityLog.create({ data: { level, source, message } })
   } catch (err) {

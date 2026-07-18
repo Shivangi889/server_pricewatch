@@ -61,6 +61,13 @@ export function startCheckWorker() {
   )
 
   worker.on('completed', (job) => {
+    if (job.name === 'sweep' || job.name?.startsWith('sweep')) {
+      const r = job.returnvalue as { enqueued?: number; skipped?: string } | undefined
+      console.log(
+        `[worker] completed sweep ${job.id} enqueued=${r?.enqueued ?? '?'}`,
+      )
+      return
+    }
     console.log(`[worker] completed ${job.name} ${job.id}`)
   })
 

@@ -2,14 +2,14 @@ import { amazonScraper } from './amazon.js'
 import { flipkartScraper } from './flipkart.js'
 import {
   bigbasketScraper,
-  blinkitScraper,
   cromaScraper,
   instamartScraper,
   jiomartScraper,
   meeshoScraper,
   relianceDigitalScraper,
-  zeptoScraper,
 } from './meeshoAndQuick.js'
+import { blinkitScraper } from './blinkit.js'
+import { zeptoScraper } from './zepto.js'
 import { demoScrape } from './demo.js'
 import type { ScrapeContext, ScrapeResult, StoreScraper } from './types.js'
 
