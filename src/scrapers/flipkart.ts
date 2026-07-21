@@ -9,6 +9,33 @@ import {
 import { scrapeLimits } from './scrapeConfig.js'
 import type { ScrapeContext, ScrapeResult, StoreScraper } from './types.js'
 
+/** Flipkart product id from query (?pid=) or iid (….MOBxxxx.SEARCH). */
+export function extractFlipkartPid(url: string): string | null {
+  try {
+    const u = new URL(url)
+    const pid = u.searchParams.get('pid')
+    if (pid && /^MOB[A-Z0-9]+$/i.test(pid)) return pid.toUpperCase()
+
+    const iid = u.searchParams.get('iid') || ''
+    const fromIid = iid.match(/\.(MOB[A-Z0-9]+)\./i)
+    if (fromIid) return fromIid[1].toUpperCase()
+
+    // Path sometimes unused; lid embeds pid after LST
+    const lid = u.searchParams.get('lid') || ''
+    const fromLid = lid.match(/^LST(MOB[A-Z0-9]+)/i)
+    if (fromLid) return fromLid[1].toUpperCase()
+
+    return null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Keep pid/lid/marketplace so Flipkart serves THAT variant.
+ * Stripping pid (old behavior) made every color/RAM link fall back to the
+ * default swatch — e.g. 4/64 WOW shown for an 8/128 URL.
+ */
 function normalizeFlipkartUrl(url: string) {
   let out = url.trim()
   if (out.includes('dl.flipkart.com/dl/')) {
@@ -20,13 +47,39 @@ function normalizeFlipkartUrl(url: string) {
   }
   try {
     const u = new URL(out)
+    // Search result pages are not a single SKU — refuse later
+    if (/\/search/i.test(u.pathname)) return u.toString()
+
     if (!u.hostname.includes('dl.flipkart.com')) {
+      const pid = u.searchParams.get('pid')
+      const lid = u.searchParams.get('lid')
+      const marketplace = u.searchParams.get('marketplace') || 'FLIPKART'
       u.search = ''
       u.hash = ''
+      if (pid) u.searchParams.set('pid', pid)
+      if (lid) u.searchParams.set('lid', lid)
+      u.searchParams.set('marketplace', marketplace)
     }
     return u.toString()
   } catch {
     return out
+  }
+}
+
+function assertProductUrl(url: string) {
+  let u: URL
+  try {
+    u = new URL(url)
+  } catch {
+    throw new Error('Flipkart: invalid product URL')
+  }
+  if (/\/search/i.test(u.pathname) || u.searchParams.has('q') && !/\/p\//i.test(u.pathname)) {
+    throw new Error(
+      'Flipkart: paste a product page URL (…/p/itm…?pid=MOB…), not a search results link',
+    )
+  }
+  if (!/\/p\//i.test(u.pathname) && !u.hostname.includes('dl.flipkart.com')) {
+    throw new Error('Flipkart: URL must be a product page (/p/…) or short share link')
   }
 }
 
@@ -45,8 +98,7 @@ function extractBuyAtPrices(text: string): number[] {
 
 /**
  * Pair nepPrice + fsp from the SAME compact JSON object only.
- * Never mix EMI/exchange fsp blobs with another SKU's nep — that previously
- * let list price (₹27,999) look like WOW against a higher exchange fsp.
+ * Never mix EMI/exchange fsp blobs with another SKU's nep.
  */
 function extractPpdPrices(text: string): { selling: number | null; wow: number | null } {
   let best: { selling: number; wow: number } | null = null
@@ -67,7 +119,6 @@ function extractPpdPrices(text: string): { selling: number | null; wow: number |
     if (!Number.isFinite(nep) || !Number.isFinite(fsp)) continue
     if (nep <= 0 || fsp <= 0 || nep >= fsp) continue
 
-    // Prefer objects that look like the WOW deal card
     const wowMarked = /nepSubTitle|buyAtPrice|Lowest price|Apply offers/i.test(obj)
     if (!best) {
       best = { selling: fsp, wow: nep }
@@ -115,7 +166,51 @@ function extractWowFromLowestLabel(
   return found
 }
 
-function parseFlipkartDom($: ReturnType<typeof import('cheerio').load>) {
+/** Storage/RAM hints from URL slug — used to reject wrong-variant titles. */
+function variantHintsFromUrl(url: string): { storageGb?: number; ramGb?: number; slug: string } {
+  try {
+    const slug = new URL(url).pathname.toLowerCase()
+    // Prefer the last "-N-gb" in the slug (storage); ignore earlier noise like 5g
+    const allGb = [...slug.matchAll(/-(\d+)-gb(?:-|$)/gi)]
+    const storageGb = allGb.length ? Number(allGb[allGb.length - 1][1]) : undefined
+    const ram = slug.match(/-(\d+)-gb-ram(?:-|$)/i)
+    const ramGb = ram ? Number(ram[1]) : undefined
+    return { storageGb, ramGb, slug }
+  } catch {
+    return { slug: '' }
+  }
+}
+
+/**
+ * Only fail when the page title clearly names a *different* storage size.
+ * If the title has no parseable storage, allow (some Flipkart titles omit it).
+ */
+function titleMatchesUrlVariant(title: string | undefined, url: string): boolean {
+  if (!title) return true
+  const hints = variantHintsFromUrl(url)
+  if (!hints.storageGb) return true
+
+  const storages = new Set<number>()
+  for (const m of title.matchAll(/\(([^)]*)\)/g)) {
+    const inner = m[1]
+    const ramOnly = [...inner.matchAll(/\b(\d+)\s*GB\s*RAM\b/gi)].map((x) => Number(x[1]))
+    for (const g of inner.matchAll(/\b(\d+)\s*GB\b/gi)) {
+      const n = Number(g[1])
+      if (!ramOnly.includes(n)) storages.add(n)
+    }
+  }
+  for (const m of title.matchAll(/\b(\d+)\s*GB\s*Storage\b/gi)) {
+    storages.add(Number(m[1]))
+  }
+
+  if (storages.size === 0) return true
+  return storages.has(hints.storageGb!)
+}
+
+function parseFlipkartDom(
+  $: ReturnType<typeof import('cheerio').load>,
+  opts?: { pid?: string | null; url?: string },
+) {
   const ld = extractJsonLd($)
 
   let embeddedSelling: number | null = null
@@ -129,7 +224,6 @@ function parseFlipkartDom($: ReturnType<typeof import('cheerio').load>) {
     if (text.length < 50) return
 
     const ppd = extractPpdPrices(text)
-    // Keep the primary SKU pair (lowest real WOW), do not min() unrelated fsps
     if (ppd.wow && ppd.selling) {
       if (!embeddedWow || ppd.wow < embeddedWow) {
         embeddedWow = ppd.wow
@@ -171,25 +265,39 @@ function parseFlipkartDom($: ReturnType<typeof import('cheerio').load>) {
     null
 
   const labelWow = extractWowFromLowestLabel($)
-  const buyAtWow = buyAt.length ? Math.min(...buyAt.filter((n) => n > 999)) : null
-
-  // List / selling price: prefer paired fsp from the WOW object; DOM as fallback
+  // With pid kept in the request URL, Buy-at on the page is for THIS variant —
+  // do NOT Math.min across leftover swatch noise; prefer the first/primary Buy at,
+  // then the min only among values that sit below this page's selling price.
+  const buyAtAll = buyAt.filter((n) => n > 999)
   const sellingPrice = embeddedSelling || domSelling || null
+  let buyAtWow: number | null = null
+  if (buyAtAll.length) {
+    if (sellingPrice) {
+      const below = buyAtAll.filter((n) => n < sellingPrice)
+      buyAtWow = below.length ? Math.min(...below) : null
+    } else {
+      buyAtWow = buyAtAll[0]
+    }
+  }
 
-  /**
-   * MANDATORY: accept WOW only from explicit UI markers (Buy at / Lowest price for you).
-   * Bare nepPrice alone previously let list price slip through against a higher EMI fsp.
-   */
   const explicitWow = [buyAtWow, labelWow].filter(
     (n): n is number => typeof n === 'number' && n > 999,
   )
   if (!explicitWow.length) {
-    return { title, image, available: true, sellingPrice, wowPrice: null as number | null }
+    return {
+      title,
+      image,
+      available: true,
+      sellingPrice,
+      wowPrice: null as number | null,
+      buyAtWow,
+      labelWow,
+      variantOk: true,
+    }
   }
 
   let wowPrice: number | null = Math.min(...explicitWow)
 
-  // If nep agrees (or is lower but still below list), allow the lower confirmed WOW
   if (embeddedWow && sellingPrice && embeddedWow < sellingPrice) {
     if (explicitWow.some((e) => e === embeddedWow) || embeddedWow < wowPrice) {
       wowPrice = Math.min(wowPrice, embeddedWow)
@@ -204,6 +312,8 @@ function parseFlipkartDom($: ReturnType<typeof import('cheerio').load>) {
   const available =
     ld?.available ?? (soldOutBanner.includes('sold out') ? false : true)
 
+  const variantOk = opts?.url ? titleMatchesUrlVariant(title, opts.url) : true
+
   return {
     title,
     image,
@@ -212,6 +322,8 @@ function parseFlipkartDom($: ReturnType<typeof import('cheerio').load>) {
     wowPrice,
     buyAtWow,
     labelWow,
+    variantOk,
+    pid: opts?.pid || undefined,
   }
 }
 
@@ -221,8 +333,8 @@ function wowResult(
 ): ScrapeResult | null {
   if (!parsed.wowPrice || !parsed.sellingPrice) return null
   if (parsed.wowPrice >= parsed.sellingPrice) return null
-  // Must have come from Buy at / Lowest label path (enforced in parseFlipkartDom)
   if (!parsed.buyAtWow && !parsed.labelWow) return null
+  if (parsed.variantOk === false) return null
 
   return {
     title: parsed.title || undefined,
@@ -232,19 +344,38 @@ function wowResult(
     discount: 0,
     available: parsed.available,
     source: 'live',
-    rawNote: `${rawNote} wow=${parsed.wowPrice} sell=${parsed.sellingPrice} buyAt=${parsed.buyAtWow ?? '-'} label=${parsed.labelWow ?? '-'}`,
+    rawNote:
+      `${rawNote} wow=${parsed.wowPrice} sell=${parsed.sellingPrice} ` +
+      `buyAt=${parsed.buyAtWow ?? '-'} label=${parsed.labelWow ?? '-'} ` +
+      `pid=${parsed.pid ?? '-'}`,
   }
 }
 
 async function scrapeFlipkart(ctx: ScrapeContext): Promise<ScrapeResult> {
+  assertProductUrl(ctx.url)
   const url = normalizeFlipkartUrl(ctx.url)
+  assertProductUrl(url)
+  const pid = extractFlipkartPid(url) || extractFlipkartPid(ctx.url)
   const limits = scrapeLimits()
+
+  const tryParse = ($: ReturnType<typeof import('cheerio').load>, note: string) => {
+    const parsed = parseFlipkartDom($, { pid, url: ctx.url })
+    if (parsed.variantOk === false) {
+      throw new Error(
+        `Flipkart variant mismatch: page title "${parsed.title}" does not match URL variant ` +
+          `(expected storage/RAM from link). Keep ?pid= in the product URL.`,
+      )
+    }
+    return wowResult(parsed, note)
+  }
 
   try {
     const $ = await fetchHtml(url)
-    const hit = wowResult(parseFlipkartDom($), 'http-wow')
+    const hit = tryParse($, 'http-wow')
     if (hit) return hit
-  } catch {
+  } catch (err) {
+    // Variant mismatch should not fall through silently to another variant
+    if (err instanceof Error && /variant mismatch/i.test(err.message)) throw err
     /* fall through */
   }
 
@@ -264,7 +395,7 @@ async function scrapeFlipkart(ctx: ScrapeContext): Promise<ScrapeResult> {
           navigationTimeoutMs: Math.max(limits.navigationTimeoutMs, 30_000),
         })
 
-    const hit = wowResult(parseFlipkartDom($), 'browser-wow')
+    const hit = tryParse($, 'browser-wow')
     if (hit) return hit
 
     throw new Error(
@@ -272,6 +403,7 @@ async function scrapeFlipkart(ctx: ScrapeContext): Promise<ScrapeResult> {
     )
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
+    if (/variant mismatch/i.test(msg)) throw err
     throw new Error(
       /timeout|disabled/i.test(msg)
         ? `Flipkart timed out looking for WOW price. Add SCRAPERAPI_KEY or retry. (${msg})`
