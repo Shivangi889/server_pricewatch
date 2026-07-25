@@ -143,6 +143,40 @@ export async function checkProductJob(data: CheckJobData) {
     )
   } catch (err) {
     const msg = err instanceof Error ? err.message : 'scrape failed'
+    // Pincode not deliverable is a normal business state — keep Tracking, mark unavailable
+    if (
+      /PIN_NOT_SERVICEABLE|NOT_SERVICEABLE|PRODUCT_NOT_IN_STORE/i.test(msg) &&
+      product.store.requiresPincode
+    ) {
+      if (data.pincode && pinRow) {
+        await prisma.productPincode.update({
+          where: { id: pinRow.id },
+          data: { lastAvailable: false, lastCheckedAt: new Date() },
+        })
+      }
+      await prisma.product.update({
+        where: { id: product.id },
+        data: {
+          status: 'tracking',
+          lastChecked: new Date(),
+          availability: 'out_of_stock',
+        },
+      })
+      await logActivity(
+        'info',
+        product.store.slug,
+        `${product.title}: pincode ${data.pincode || ''} not serviceable — kept tracking`,
+      )
+      return {
+        ok: true,
+        source: 'live',
+        price: previousPrice,
+        available: false,
+        alerts: [],
+        skipped: 'pin_not_serviceable',
+      }
+    }
+
     await prisma.product.update({
       where: { id: product.id },
       data: { status: 'error', lastChecked: new Date() },
@@ -161,24 +195,39 @@ export async function checkProductJob(data: CheckJobData) {
     price: scrape.price,
   }
 
-  // Flipkart must never store/alert on list price (₹27,999) — only WOW (Buy at / Lowest)
-  const flipkartWowMatchEarly =
-    typeof scrape.rawNote === 'string' ? scrape.rawNote.match(/wow=(\d+)\s+sell=(\d+)/) : null
-  const flipkartExplicit =
-    typeof scrape.rawNote === 'string' &&
-    (/buyAt=\d+/.test(scrape.rawNote) || /label=\d+/.test(scrape.rawNote))
+  // Flipkart must never store/alert on list/selling price — only WOW (Buy at / Lowest)
+  const flipkartNote = typeof scrape.rawNote === 'string' ? scrape.rawNote : ''
+  const flipkartMode = flipkartNote.match(/\bmode=(wow|sell)\b/)?.[1] || null
+  const flipkartWowMatchEarly = flipkartNote.match(/wow=(\d+)\s+sell=(\d+)/)
   if (product.store.slug === 'flipkart') {
+    // Reject any sell-mode leftovers from older builds
+    if (flipkartMode === 'sell') {
+      const msg =
+        'No Flipkart WOW deal on this product right now. PriceWatch only tracks “Buy at ₹…” / “Lowest price for you”.'
+      await prisma.product.update({
+        where: { id: product.id },
+        data: { status: 'error', lastChecked: new Date() },
+      })
+      await logActivity('error', product.store.slug, `${product.title}: ${msg}`)
+      throw new Error(msg)
+    }
+
     const wow = flipkartWowMatchEarly ? Number(flipkartWowMatchEarly[1]) : null
     const sell = flipkartWowMatchEarly ? Number(flipkartWowMatchEarly[2]) : null
+    const explicit =
+      /buyAt=\d+/.test(flipkartNote) ||
+      /label=\d+/.test(flipkartNote) ||
+      flipkartMode === 'wow'
     if (
       wow == null ||
       sell == null ||
-      !flipkartExplicit ||
+      !explicit ||
       scrape.price !== wow ||
       wow >= sell ||
       (scrape.discount ?? 0) !== 0
     ) {
-      const msg = `Flipkart refused non-WOW price (got ${scrape.price}, note=${scrape.rawNote || 'none'})`
+      const msg =
+        'No Flipkart WOW deal found for this product. PriceWatch only tracks “Buy at ₹…” / “Lowest price for you”, not the normal selling price.'
       await prisma.product.update({
         where: { id: product.id },
         data: { status: 'error', lastChecked: new Date() },
@@ -211,9 +260,9 @@ export async function checkProductJob(data: CheckJobData) {
   }
 
   const canPriceAlert = !data.pincode || scrape.available
-  // Flipkart: only alert on confirmed WOW scrapes (never list-price false positives)
-  const flipkartWowMatch =
-    typeof scrape.rawNote === 'string' ? scrape.rawNote.match(/wow=(\d+)\s+sell=(\d+)/) : null
+  // Flipkart: only alert on confirmed WOW scrapes (never list/selling-price false positives)
+  const flipkartNoteFull = typeof scrape.rawNote === 'string' ? scrape.rawNote : ''
+  const flipkartWowMatch = flipkartNoteFull.match(/wow=(\d+)\s+sell=(\d+)/)
   const flipkartWow = flipkartWowMatch ? Number(flipkartWowMatch[1]) : null
   const flipkartSell = flipkartWowMatch ? Number(flipkartWowMatch[2]) : null
   const isFlipkart = product.store.slug === 'flipkart'
@@ -240,7 +289,6 @@ export async function checkProductJob(data: CheckJobData) {
       data: {
         status: 'tracking',
         lastChecked: new Date(),
-        // keep previous WOW price — do not write list
         currentPrice: money(previousPrice),
         oldPrice: money(previousPrice),
         discount: 0,

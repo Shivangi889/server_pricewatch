@@ -15,12 +15,25 @@ async function runSweep() {
   }
 
   const intervalMin = owner?.checkIntervalMin || 30
-  const cutoff = new Date(Date.now() - intervalMin * 60_000)
+  // Failed scrapes used to stay status=error forever — sweep only looked at
+  // "tracking", so the UI sat on Error until a manual refresh. Retry errors
+  // sooner (≤5 min) so Flipkart WOW/block flakes recover automatically.
+  const errorRetryMin = Math.min(5, intervalMin)
+  const trackingCutoff = new Date(Date.now() - intervalMin * 60_000)
+  const errorCutoff = new Date(Date.now() - errorRetryMin * 60_000)
 
   const products = await prisma.product.findMany({
     where: {
-      status: 'tracking',
-      OR: [{ lastChecked: null }, { lastChecked: { lt: cutoff } }],
+      OR: [
+        {
+          status: 'tracking',
+          OR: [{ lastChecked: null }, { lastChecked: { lt: trackingCutoff } }],
+        },
+        {
+          status: 'error',
+          OR: [{ lastChecked: null }, { lastChecked: { lt: errorCutoff } }],
+        },
+      ],
     },
     include: { store: true, pincodes: true },
   })

@@ -120,9 +120,15 @@ productsRouter.post('/', async (req, res, next) => {
     })()
 
     const raced = await Promise.race([
-      work.then((results) => ({ done: true as const, results })),
-      new Promise<{ done: false }>((resolve) =>
-        setTimeout(() => resolve({ done: false }), waitMs),
+      work
+        .then((results) => ({ done: true as const, results, scrapeError: null as string | null }))
+        .catch((err) => ({
+          done: true as const,
+          results: [] as unknown[],
+          scrapeError: err instanceof Error ? err.message : String(err),
+        })),
+      new Promise<{ done: false; scrapeError: null }>((resolve) =>
+        setTimeout(() => resolve({ done: false, scrapeError: null }), waitMs),
       ),
     ])
 
@@ -130,6 +136,10 @@ productsRouter.post('/', async (req, res, next) => {
       void work.catch((err) => {
         console.error('[add] background scrape failed', err)
       })
+    } else if (raced.scrapeError) {
+      // Don't leave an empty ₹0 product — remove it and return a clear client error
+      await prisma.product.delete({ where: { id: product.id } }).catch(() => undefined)
+      return res.status(400).json({ error: raced.scrapeError })
     }
 
     const updated = await prisma.product.findUnique({
@@ -260,9 +270,15 @@ productsRouter.post('/:id/refresh', async (req, res, next) => {
     })()
 
     const raced = await Promise.race([
-      work.then((results) => ({ done: true as const, results })),
-      new Promise<{ done: false }>((resolve) =>
-        setTimeout(() => resolve({ done: false }), waitMs),
+      work
+        .then((results) => ({ done: true as const, results, scrapeError: null as string | null }))
+        .catch((err) => ({
+          done: true as const,
+          results: [] as unknown[],
+          scrapeError: err instanceof Error ? err.message : String(err),
+        })),
+      new Promise<{ done: false; scrapeError: null }>((resolve) =>
+        setTimeout(() => resolve({ done: false, scrapeError: null }), waitMs),
       ),
     ])
 
@@ -288,9 +304,10 @@ productsRouter.post('/:id/refresh', async (req, res, next) => {
       include: { store: true, pincodes: true },
     })
     return res.json({
-      ok: true,
+      ok: !raced.scrapeError,
       mode: 'inline',
       pending: false,
+      scrapeWarning: raced.scrapeError,
       durationMs: Date.now() - t0,
       results: raced.results,
       product: updated,

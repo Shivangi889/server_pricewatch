@@ -584,8 +584,8 @@ async function scrapeZepto(ctx: ScrapeContext): Promise<ScrapeResult> {
   )
 
   // Business states we still want to record (price tracking / availability flip):
+  // Never throw — match Blinkit: keep previous/list price, available:false, status stays tracking.
   if (check.availability === 'NOT_SERVICEABLE' || check.availability === 'PRODUCT_NOT_IN_STORE') {
-    // Try to keep a public list price so history/price alerts still work.
     let price = check.price ?? 0
     let title = check.title
     let image = check.image
@@ -601,11 +601,21 @@ async function scrapeZepto(ctx: ScrapeContext): Promise<ScrapeResult> {
         /* no public price */
       }
     }
+    if (!price && ctx.previousPrice && ctx.previousPrice > 0) {
+      price = ctx.previousPrice
+    }
     if (!price) {
-      throw new ZeptoError(
-        check.availability === 'NOT_SERVICEABLE' ? 'PIN_NOT_SERVICEABLE' : 'PRODUCT_NOT_FOUND',
-        `pincode ${ctx.pincode}: ${check.availability}`,
-      )
+      // Still a successful check: pincode simply can't deliver this item
+      return {
+        title,
+        image,
+        price: ctx.previousPrice && ctx.previousPrice > 0 ? ctx.previousPrice : 0,
+        oldPrice,
+        discount: 0,
+        available: false,
+        source: 'live',
+        rawNote: `pin ${ctx.pincode} ${check.availability} city=${d.city ?? '?'} (no price)`,
+      }
     }
     return {
       title,

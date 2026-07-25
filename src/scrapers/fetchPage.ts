@@ -69,9 +69,13 @@ export function withScraperProxy(targetUrl: string, opts?: { render?: boolean })
     api_key: key,
     url: targetUrl,
     country_code: 'in',
-    // JS render is slow/expensive — off by default on free; Amaz/Flipkart often work without it
+    // JS render is slow/expensive — off by default; Amazon on cloud usually needs it
     render: opts?.render ? 'true' : 'false',
   })
+  // Residential / premium IPs help Amazon (optional paid ScraperAPI feature)
+  if ((process.env.SCRAPERAPI_PREMIUM || '').toLowerCase() === 'true') {
+    params.set('premium', 'true')
+  }
   return `https://api.scraperapi.com?${params.toString()}`
 }
 
@@ -349,6 +353,15 @@ export function discountFrom(oldPrice?: number | null, price?: number | null) {
 }
 
 export function extractAsin(url: string): string | null {
-  const m = url.match(/\/(?:dp|gp\/product|product)\/([A-Z0-9]{10})/i)
+  try {
+    const u = new URL(url)
+    const q = u.searchParams.get('asin')
+    if (q && /^[A-Z0-9]{10}$/i.test(q)) return q.toUpperCase()
+  } catch {
+    /* ignore */
+  }
+  const m = url.match(
+    /\/(?:dp|gp\/product|gp\/aw\/d|gp\/offer-listing|product)\/([A-Z0-9]{10})(?:[/?]|$)/i,
+  )
   return m?.[1]?.toUpperCase() || null
 }

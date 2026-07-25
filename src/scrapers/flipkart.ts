@@ -100,8 +100,12 @@ function extractBuyAtPrices(text: string): number[] {
  * Pair nepPrice + fsp from the SAME compact JSON object only.
  * Never mix EMI/exchange fsp blobs with another SKU's nep.
  */
-function extractPpdPrices(text: string): { selling: number | null; wow: number | null } {
-  let best: { selling: number; wow: number } | null = null
+function extractPpdPrices(text: string): {
+  selling: number | null
+  wow: number | null
+  marked: boolean
+} {
+  let best: { selling: number; wow: number; marked: boolean } | null = null
 
   const objRe = /\{[^{}]{0,600}\}/g
   let m: RegExpExecArray | null
@@ -119,17 +123,19 @@ function extractPpdPrices(text: string): { selling: number | null; wow: number |
     if (!Number.isFinite(nep) || !Number.isFinite(fsp)) continue
     if (nep <= 0 || fsp <= 0 || nep >= fsp) continue
 
-    const wowMarked = /nepSubTitle|buyAtPrice|Lowest price|Apply offers/i.test(obj)
+    const wowMarked = /nepSubTitle|buyAtPrice|Lowest price|Apply offers|WOW/i.test(obj)
     if (!best) {
-      best = { selling: fsp, wow: nep }
-    } else if (wowMarked && nep <= best.wow) {
-      best = { selling: fsp, wow: nep }
+      best = { selling: fsp, wow: nep, marked: wowMarked }
+    } else if (wowMarked && (!best.marked || nep <= best.wow)) {
+      best = { selling: fsp, wow: nep, marked: true }
     } else if (!wowMarked && nep < best.wow) {
-      best = { selling: fsp, wow: nep }
+      best = { selling: fsp, wow: nep, marked: best.marked }
     }
   }
 
-  return best ? { selling: best.selling, wow: best.wow } : { selling: null, wow: null }
+  return best
+    ? { selling: best.selling, wow: best.wow, marked: best.marked }
+    : { selling: null, wow: null, marked: false }
 }
 
 function extractWowFromLowestLabel(
@@ -215,6 +221,7 @@ function parseFlipkartDom(
 
   let embeddedSelling: number | null = null
   let embeddedWow: number | null = null
+  let embeddedMarked = false
   let embeddedTitle: string | undefined
   let embeddedImage: string | undefined
   const buyAt: number[] = []
@@ -225,10 +232,13 @@ function parseFlipkartDom(
 
     const ppd = extractPpdPrices(text)
     if (ppd.wow && ppd.selling) {
-      if (!embeddedWow || ppd.wow < embeddedWow) {
+      if (!embeddedWow || ppd.wow < embeddedWow || (ppd.marked && !embeddedMarked)) {
         embeddedWow = ppd.wow
         embeddedSelling = ppd.selling
+        embeddedMarked = ppd.marked || embeddedMarked
       }
+    } else if (ppd.selling && !embeddedSelling) {
+      embeddedSelling = ppd.selling
     }
 
     buyAt.push(...extractBuyAtPrices(text))
@@ -262,12 +272,12 @@ function parseFlipkartDom(
     parseMoney($('div._30jeq3._16Jk6d').first().text()) ||
     parseMoney($('div._30jeq3').first().text()) ||
     parseMoney($('[class*="Nx9bqj"]').first().text()) ||
+    parseMoney(ld?.price != null ? String(ld.price) : '') ||
     null
 
   const labelWow = extractWowFromLowestLabel($)
   // With pid kept in the request URL, Buy-at on the page is for THIS variant —
-  // do NOT Math.min across leftover swatch noise; prefer the first/primary Buy at,
-  // then the min only among values that sit below this page's selling price.
+  // do NOT Math.min across leftover swatch noise; prefer values below selling.
   const buyAtAll = buyAt.filter((n) => n > 999)
   const sellingPrice = embeddedSelling || domSelling || null
   let buyAtWow: number | null = null
@@ -283,24 +293,14 @@ function parseFlipkartDom(
   const explicitWow = [buyAtWow, labelWow].filter(
     (n): n is number => typeof n === 'number' && n > 999,
   )
-  if (!explicitWow.length) {
-    return {
-      title,
-      image,
-      available: true,
-      sellingPrice,
-      wowPrice: null as number | null,
-      buyAtWow,
-      labelWow,
-      variantOk: true,
-    }
-  }
 
-  let wowPrice: number | null = Math.min(...explicitWow)
+  let wowPrice: number | null = explicitWow.length ? Math.min(...explicitWow) : null
 
+  // JSON nepPrice is enough when Flipkart marks it as WOW / Buy-at (DOM text often missing)
   if (embeddedWow && sellingPrice && embeddedWow < sellingPrice) {
-    if (explicitWow.some((e) => e === embeddedWow) || embeddedWow < wowPrice) {
-      wowPrice = Math.min(wowPrice, embeddedWow)
+    if (embeddedMarked || explicitWow.length) {
+      wowPrice =
+        wowPrice != null ? Math.min(wowPrice, embeddedWow) : embeddedWow
     }
   }
 
@@ -322,33 +322,60 @@ function parseFlipkartDom(
     wowPrice,
     buyAtWow,
     labelWow,
+    embeddedMarked,
     variantOk,
     pid: opts?.pid || undefined,
   }
 }
 
-function wowResult(
+function flipkartResult(
   parsed: ReturnType<typeof parseFlipkartDom>,
   rawNote: string,
 ): ScrapeResult | null {
-  if (!parsed.wowPrice || !parsed.sellingPrice) return null
-  if (parsed.wowPrice >= parsed.sellingPrice) return null
-  if (!parsed.buyAtWow && !parsed.labelWow) return null
   if (parsed.variantOk === false) return null
 
-  return {
-    title: parsed.title || undefined,
-    image: parsed.image,
-    price: parsed.wowPrice,
-    oldPrice: parsed.wowPrice,
-    discount: 0,
-    available: parsed.available,
-    source: 'live',
-    rawNote:
-      `${rawNote} wow=${parsed.wowPrice} sell=${parsed.sellingPrice} ` +
-      `buyAt=${parsed.buyAtWow ?? '-'} label=${parsed.labelWow ?? '-'} ` +
-      `pid=${parsed.pid ?? '-'}`,
+  const hasWowSignal =
+    Boolean(parsed.buyAtWow) || Boolean(parsed.labelWow) || parsed.embeddedMarked
+
+  if (
+    parsed.wowPrice &&
+    parsed.sellingPrice &&
+    parsed.wowPrice < parsed.sellingPrice &&
+    hasWowSignal
+  ) {
+    return {
+      title: parsed.title || undefined,
+      image: parsed.image,
+      price: parsed.wowPrice,
+      oldPrice: parsed.wowPrice,
+      discount: 0,
+      available: parsed.available,
+      source: 'live',
+      rawNote:
+        `${rawNote} mode=wow wow=${parsed.wowPrice} sell=${parsed.sellingPrice} ` +
+        `buyAt=${parsed.buyAtWow ?? '-'} label=${parsed.labelWow ?? '-'} ` +
+        `pid=${parsed.pid ?? '-'}`,
+    }
   }
+
+  return null
+}
+
+/** Plain-language errors for the Track Product UI. */
+function noWowError(parsed: ReturnType<typeof parseFlipkartDom> | null): Error {
+  if (parsed?.sellingPrice && parsed.sellingPrice > 999) {
+    return new Error(
+      'No Flipkart WOW deal on this product right now. ' +
+        'PriceWatch only tracks the special “Buy at ₹…” / “Lowest price for you” price — not the normal selling price. ' +
+        'Open the product on Flipkart; if you see Buy at ₹…, copy that page link (with pid=MOB…) and try again. ' +
+        'If there is no Buy at deal, wait until Flipkart shows one.',
+    )
+  }
+  return new Error(
+    'Could not read this Flipkart product. ' +
+      'Copy the link from your browser address bar — it must look like …/p/itm…?pid=MOB… ' +
+      '(not a search results link). Then try again.',
+  )
 }
 
 async function scrapeFlipkart(ctx: ScrapeContext): Promise<ScrapeResult> {
@@ -357,25 +384,28 @@ async function scrapeFlipkart(ctx: ScrapeContext): Promise<ScrapeResult> {
   assertProductUrl(url)
   const pid = extractFlipkartPid(url) || extractFlipkartPid(ctx.url)
   const limits = scrapeLimits()
+  let lastParsed: ReturnType<typeof parseFlipkartDom> | null = null
 
   const tryParse = ($: ReturnType<typeof import('cheerio').load>, note: string) => {
     const parsed = parseFlipkartDom($, { pid, url: ctx.url })
+    lastParsed = parsed
     if (parsed.variantOk === false) {
       throw new Error(
-        `Flipkart variant mismatch: page title "${parsed.title}" does not match URL variant ` +
-          `(expected storage/RAM from link). Keep ?pid= in the product URL.`,
+        'This Flipkart link opened a different size/variant than expected. ' +
+          'On Flipkart, select the exact colour / RAM / storage, then copy the address-bar link (keep ?pid=MOB…).',
       )
     }
-    return wowResult(parsed, note)
+    return flipkartResult(parsed, note)
   }
 
   try {
     const $ = await fetchHtml(url)
-    const hit = tryParse($, 'http-wow')
+    const hit = tryParse($, 'http')
     if (hit) return hit
   } catch (err) {
-    // Variant mismatch should not fall through silently to another variant
-    if (err instanceof Error && /variant mismatch/i.test(err.message)) throw err
+    if (err instanceof Error && /different size\/variant|invalid product|must be a product|search results/i.test(err.message)) {
+      throw err
+    }
     /* fall through */
   }
 
@@ -395,18 +425,22 @@ async function scrapeFlipkart(ctx: ScrapeContext): Promise<ScrapeResult> {
           navigationTimeoutMs: Math.max(limits.navigationTimeoutMs, 30_000),
         })
 
-    const hit = tryParse($, 'browser-wow')
+    const hit = tryParse($, 'browser')
     if (hit) return hit
 
-    throw new Error(
-      'Flipkart WOW price not found (need Buy at / Lowest price for you — not list price)',
-    )
+    throw noWowError(lastParsed)
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
-    if (/variant mismatch/i.test(msg)) throw err
+    if (
+      /No Flipkart WOW|Could not read this Flipkart|different size\/variant|invalid product|must be a product|search results/i.test(
+        msg,
+      )
+    ) {
+      throw err instanceof Error ? err : new Error(msg)
+    }
     throw new Error(
       /timeout|disabled/i.test(msg)
-        ? `Flipkart timed out looking for WOW price. Add SCRAPERAPI_KEY or retry. (${msg})`
+        ? 'Flipkart is taking too long to respond. Please wait a minute and try again.'
         : msg,
     )
   }
