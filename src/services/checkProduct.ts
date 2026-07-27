@@ -177,6 +177,28 @@ export async function checkProductJob(data: CheckJobData) {
       }
     }
 
+    // Non-fatal scraper states: bad/unsupported product URL, missing WOW deal, or
+    // cloud anti-bot blocks. Keep tracking so the dashboard is not stuck in Error.
+    if (
+      /Use a direct product URL|No Flipkart WOW deal|Could not read this Flipkart product|Amazon blocks Railway|Amazon still blocked/i.test(
+        msg,
+      )
+    ) {
+      await prisma.product.update({
+        where: { id: product.id },
+        data: { status: 'tracking', lastChecked: new Date() },
+      })
+      await logActivity('warn', product.store.slug, `${product.title}: ${msg}`)
+      return {
+        ok: false,
+        source: 'live',
+        price: previousPrice,
+        available: previousAvailable ?? false,
+        alerts: [],
+        skipped: 'non_fatal_scrape',
+      }
+    }
+
     await prisma.product.update({
       where: { id: product.id },
       data: { status: 'error', lastChecked: new Date() },
@@ -206,10 +228,17 @@ export async function checkProductJob(data: CheckJobData) {
         'No Flipkart WOW deal on this product right now. PriceWatch only tracks “Buy at ₹…” / “Lowest price for you”.'
       await prisma.product.update({
         where: { id: product.id },
-        data: { status: 'error', lastChecked: new Date() },
+        data: { status: 'tracking', lastChecked: new Date() },
       })
-      await logActivity('error', product.store.slug, `${product.title}: ${msg}`)
-      throw new Error(msg)
+      await logActivity('warn', product.store.slug, `${product.title}: ${msg}`)
+      return {
+        ok: false,
+        source: 'live',
+        price: previousPrice,
+        available: previousAvailable ?? false,
+        alerts: [],
+        skipped: 'flipkart_no_wow',
+      }
     }
 
     const wow = flipkartWowMatchEarly ? Number(flipkartWowMatchEarly[1]) : null
@@ -230,10 +259,17 @@ export async function checkProductJob(data: CheckJobData) {
         'No Flipkart WOW deal found for this product. PriceWatch only tracks “Buy at ₹…” / “Lowest price for you”, not the normal selling price.'
       await prisma.product.update({
         where: { id: product.id },
-        data: { status: 'error', lastChecked: new Date() },
+        data: { status: 'tracking', lastChecked: new Date() },
       })
-      await logActivity('error', product.store.slug, `${product.title}: ${msg}`)
-      throw new Error(msg)
+      await logActivity('warn', product.store.slug, `${product.title}: ${msg}`)
+      return {
+        ok: false,
+        source: 'live',
+        price: previousPrice,
+        available: previousAvailable ?? false,
+        alerts: [],
+        skipped: 'flipkart_no_wow',
+      }
     }
   }
 

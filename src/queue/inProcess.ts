@@ -36,6 +36,11 @@ export async function sweepInline() {
       include: { store: true, pincodes: true },
     })
 
+    // Error retries first — this loop is fully sequential, so a big batch
+    // of routine tracking checks could otherwise starve error products of
+    // their ≤5min retry the same way the BullMQ queue could.
+    products.sort((a, b) => (a.status === 'error' ? -1 : 0) - (b.status === 'error' ? -1 : 0))
+
     let checked = 0
     for (const product of products) {
       if (product.store.requiresPincode) {

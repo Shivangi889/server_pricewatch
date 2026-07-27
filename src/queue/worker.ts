@@ -40,16 +40,21 @@ async function runSweep() {
 
   let enqueued = 0
   for (const product of products) {
+    // Error retries jump ahead of routine tracking checks (BullMQ: no
+    // priority / 0 always beats any prioritized job) so a handful of
+    // stuck "error" products can't get buried behind a big wave of
+    // regular re-checks and miss their ≤5min retry window.
+    const priority = product.status === 'error' ? undefined : 5
     if (product.store.requiresPincode) {
       for (const pin of product.pincodes) {
-        await enqueueProductCheck({ productId: product.id, pincode: pin.pincode })
+        await enqueueProductCheck({ productId: product.id, pincode: pin.pincode }, { priority })
         enqueued += 1
       }
       if (product.pincodes.length === 0) {
         await logActivity('warn', 'scheduler', `Skip ${product.title} — no pincodes`)
       }
     } else {
-      await enqueueProductCheck({ productId: product.id })
+      await enqueueProductCheck({ productId: product.id }, { priority })
       enqueued += 1
     }
   }

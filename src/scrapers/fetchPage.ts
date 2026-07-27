@@ -2,7 +2,7 @@ import * as cheerio from 'cheerio'
 import { chromium } from 'playwright-extra'
 import StealthPlugin from 'puppeteer-extra-plugin-stealth'
 import type { Browser } from 'playwright'
-import { scrapeLimits } from './scrapeConfig.js'
+import { isCloudHost, scrapeLimits } from './scrapeConfig.js'
 
 chromium.use(StealthPlugin())
 
@@ -61,10 +61,23 @@ export async function closeBrowser() {
   }
 }
 
-/** HTTP-only path via ScraperAPI when key is set; otherwise direct URL. */
-export function withScraperProxy(targetUrl: string, opts?: { render?: boolean }) {
+/**
+ * HTTP-only path via ScraperAPI — only kicks in on cloud hosts (Railway/
+ * Render/Fly), where direct requests get IP-blocked. On a local machine the
+ * direct connection almost always works fine, so we skip the proxy there
+ * even if SCRAPERAPI_KEY happens to be set (e.g. for testing prod issues) —
+ * otherwise every single scrape gets routed through ScraperAPI locally too,
+ * and any hiccup with that key (rate limit, plan restriction, wrong param)
+ * takes down scraping entirely even though direct access works.
+ * Pass `force: true` to deliberately exercise the proxy path locally.
+ */
+export function withScraperProxy(
+  targetUrl: string,
+  opts?: { render?: boolean; force?: boolean },
+) {
   const key = process.env.SCRAPERAPI_KEY?.trim()
   if (!key) return targetUrl
+  if (!opts?.force && !isCloudHost()) return targetUrl
   const params = new URLSearchParams({
     api_key: key,
     url: targetUrl,
